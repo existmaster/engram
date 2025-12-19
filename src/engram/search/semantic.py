@@ -18,6 +18,7 @@ class SemanticSearch:
         query: str,
         limit: int = 10,
         mode: str = "hybrid",
+        project_path: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search observations using specified mode.
@@ -26,18 +27,22 @@ class SemanticSearch:
             query: Search query
             limit: Maximum results
             mode: "semantic" (vector only), "keyword" (FTS only), "hybrid" (both)
+            project_path: Filter by project path (None = all projects)
         """
         results = []
 
+        # Build project filter for vector search
+        where_filter = {"project_path": project_path} if project_path else None
+
         if mode in ("semantic", "hybrid"):
-            vector_results = self._vector.search(query, limit=limit)
+            vector_results = self._vector.search(query, limit=limit, where=where_filter)
             for r in vector_results:
                 r["source"] = "semantic"
                 r["score"] = 1 - r.get("distance", 0)  # Convert distance to similarity
             results.extend(vector_results)
 
         if mode in ("keyword", "hybrid"):
-            fts_results = search_fts(self._db, query, limit=limit)
+            fts_results = search_fts(self._db, query, limit=limit, project_path=project_path)
             for r in fts_results:
                 r["source"] = "keyword"
                 r["score"] = abs(r.get("rank", 0))  # FTS5 rank is negative

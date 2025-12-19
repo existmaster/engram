@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .core.db import init_db, save_observation
+from .core.project import get_project_path, get_project_name
 from .core.vector import VectorStore
 from .search.semantic import SemanticSearch
 
@@ -29,16 +30,25 @@ def save(content: str, obs_type: str, session: str):
     db = init_db()
     vector = VectorStore()
 
+    # Auto-detect project
+    project_path = get_project_path()
+    project_name = get_project_name()
+
     # Check if embedder is ready
     if not vector.is_ready():
         console.print("[yellow]Warning: Ollama not available. Run 'ollama pull bge-m3' first.[/yellow]")
         console.print("[dim]Saving to SQLite only (no semantic search)...[/dim]")
-        obs_id = save_observation(db, session, obs_type, content)
+        obs_id = save_observation(db, session, obs_type, content, project_path=project_path)
     else:
-        obs_id = save_observation(db, session, obs_type, content)
-        vector.add(obs_id, content, {"type": obs_type, "session_id": session})
+        obs_id = save_observation(db, session, obs_type, content, project_path=project_path)
+        vector.add(obs_id, content, {
+            "type": obs_type,
+            "session_id": session,
+            "project_path": project_path,
+            "project_name": project_name,
+        })
 
-    console.print(f"[green]Saved observation #{obs_id}[/green]")
+    console.print(f"[green]Saved observation #{obs_id}[/green] [dim]({project_name})[/dim]")
 
 
 @main.command()
@@ -47,37 +57,48 @@ def save(content: str, obs_type: str, session: str):
 @click.option("--mode", "-m", default="hybrid",
               type=click.Choice(["semantic", "keyword", "hybrid"]),
               help="Search mode")
-def search(query: str, limit: int, mode: str):
+@click.option("--project", "-p", is_flag=True, help="Filter by current project only")
+def search(query: str, limit: int, mode: str, project: bool):
     """Search observations semantically."""
     searcher = SemanticSearch()
+
+    # Get project filter if requested
+    project_filter = get_project_path() if project else None
 
     if not searcher.is_ready():
         console.print("[yellow]Warning: Ollama not available. Using keyword search only.[/yellow]")
         mode = "keyword"
 
-    results = searcher.search(query, limit=limit, mode=mode)
+    results = searcher.search(query, limit=limit, mode=mode, project_path=project_filter)
 
     if not results:
         console.print("[dim]No results found.[/dim]")
         return
 
-    table = Table(title=f"Search Results ({mode} mode)")
+    title = f"Search Results ({mode} mode)"
+    if project_filter:
+        title += f" [dim]({get_project_name()} only)[/dim]"
+
+    table = Table(title=title)
     table.add_column("#", style="dim")
     table.add_column("Type", style="cyan")
-    table.add_column("Content", max_width=60)
+    table.add_column("Content", max_width=50)
+    table.add_column("Project", style="magenta", max_width=15)
     table.add_column("Score", style="green")
-    table.add_column("Source", style="dim")
 
     for i, r in enumerate(results, 1):
-        content = r.get("content", r.get("compressed", ""))[:100]
-        if len(content) == 100:
+        content = r.get("content", r.get("compressed", ""))[:80]
+        if len(content) == 80:
             content += "..."
+        proj = r.get("metadata", {}).get("project_name", r.get("project_path", "?"))
+        if isinstance(proj, str) and "/" in proj:
+            proj = proj.split("/")[-1]  # Just show folder name
         table.add_row(
             str(i),
             r.get("type", r.get("metadata", {}).get("type", "?")),
             content,
+            proj[:15] if proj else "?",
             f"{r.get('score', 0):.3f}",
-            r.get("source", "?"),
         )
 
     console.print(table)

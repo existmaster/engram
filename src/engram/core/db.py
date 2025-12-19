@@ -39,10 +39,14 @@ def init_db(db_path: Path | None = None) -> sqlite3.Connection:
             content TEXT NOT NULL,
             compressed TEXT,     -- AI-compressed version
             file_refs TEXT,      -- JSON array of file paths
+            project_path TEXT,   -- Project root path
             created_at TEXT NOT NULL,
             token_count INTEGER,
             FOREIGN KEY (session_id) REFERENCES sessions(id)
         );
+
+        -- Index for project filtering
+        CREATE INDEX IF NOT EXISTS idx_observations_project ON observations(project_path);
 
         -- Full-text search index
         CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
@@ -82,14 +86,15 @@ def save_observation(
     content: str,
     file_refs: list[str] | None = None,
     compressed: str | None = None,
+    project_path: str | None = None,
 ) -> int:
     """Save an observation to the database."""
     import json
 
     cursor = conn.execute(
         """
-        INSERT INTO observations (session_id, type, content, compressed, file_refs, created_at, token_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO observations (session_id, type, content, compressed, file_refs, project_path, created_at, token_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             session_id,
@@ -97,6 +102,7 @@ def save_observation(
             content,
             compressed,
             json.dumps(file_refs) if file_refs else None,
+            project_path,
             datetime.now().isoformat(),
             len(content.split()),  # rough token estimate
         ),
@@ -105,17 +111,35 @@ def save_observation(
     return cursor.lastrowid
 
 
-def search_fts(conn: sqlite3.Connection, query: str, limit: int = 20) -> list[dict[str, Any]]:
-    """Full-text search on observations."""
-    cursor = conn.execute(
-        """
-        SELECT o.*, rank
-        FROM observations_fts
-        JOIN observations o ON observations_fts.rowid = o.id
-        WHERE observations_fts MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        """,
-        (query, limit),
-    )
+def search_fts(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int = 20,
+    project_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Full-text search on observations with optional project filter."""
+    if project_path:
+        cursor = conn.execute(
+            """
+            SELECT o.*, rank
+            FROM observations_fts
+            JOIN observations o ON observations_fts.rowid = o.id
+            WHERE observations_fts MATCH ? AND o.project_path = ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (query, project_path, limit),
+        )
+    else:
+        cursor = conn.execute(
+            """
+            SELECT o.*, rank
+            FROM observations_fts
+            JOIN observations o ON observations_fts.rowid = o.id
+            WHERE observations_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (query, limit),
+        )
     return [dict(row) for row in cursor.fetchall()]
