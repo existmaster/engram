@@ -1,5 +1,8 @@
 """CLI interface for Engram."""
 
+import json
+import sys
+
 import click
 from rich.console import Console
 from rich.table import Table
@@ -137,32 +140,150 @@ def status():
 
 
 @main.command()
-def init():
-    """Initialize Engram (pull embedding model)."""
+@click.option("--hooks/--no-hooks", default=True, help="Install Claude Code hooks")
+def init(hooks: bool):
+    """Initialize Engram - check dependencies and install hooks."""
     from .core.embedder import OllamaEmbedder
+    from .setup import check_ollama, check_model, check_global_install, install_hooks
 
-    console.print("[bold]Initializing Engram...[/bold]")
+    console.print("[bold]Engram Setup[/bold]\n")
 
-    # Initialize DB
-    init_db()
-    console.print("[green]SQLite database initialized[/green]")
+    all_ok = True
 
-    # Initialize vector store
-    VectorStore()
-    console.print("[green]ChromaDB initialized[/green]")
-
-    # Check/pull embedding model
-    embedder = OllamaEmbedder()
-    if embedder.is_available():
-        console.print("[green]Embedding model (bge-m3) ready[/green]")
+    # Step 1: Check Ollama
+    console.print("[bold]1. Checking Ollama...[/bold]")
+    ok, msg = check_ollama()
+    if ok:
+        console.print(f"   [green]OK[/green] {msg}")
     else:
-        console.print("[yellow]Pulling embedding model (bge-m3)...[/yellow]")
-        if embedder.pull_model():
-            console.print("[green]Model pulled successfully[/green]")
-        else:
-            console.print("[red]Failed to pull model. Run manually: ollama pull bge-m3[/red]")
+        console.print(f"   [red]FAIL[/red] {msg}")
+        all_ok = False
 
-    console.print("\n[bold green]Engram is ready![/bold green]")
+    # Step 2: Check embedding model
+    console.print("[bold]2. Checking embedding model...[/bold]")
+    ok, msg = check_model("bge-m3")
+    if ok:
+        console.print(f"   [green]OK[/green] {msg}")
+    else:
+        console.print(f"   [yellow]MISSING[/yellow] {msg}")
+        console.print("   [dim]Attempting to pull model...[/dim]")
+        embedder = OllamaEmbedder()
+        if embedder.pull_model():
+            console.print("   [green]OK[/green] Model pulled successfully")
+        else:
+            console.print("   [red]FAIL[/red] Could not pull model")
+            all_ok = False
+
+    # Step 3: Check global install
+    console.print("[bold]3. Checking global installation...[/bold]")
+    ok, msg = check_global_install()
+    if ok:
+        console.print(f"   [green]OK[/green] {msg}")
+    else:
+        console.print(f"   [yellow]MISSING[/yellow] {msg}")
+        console.print("   [dim]Run: uv tool install -e .[/dim]")
+
+    # Step 4: Initialize DB
+    console.print("[bold]4. Initializing database...[/bold]")
+    init_db()
+    VectorStore()
+    console.print("   [green]OK[/green] SQLite + ChromaDB ready")
+
+    # Step 5: Install hooks (optional)
+    if hooks:
+        console.print("[bold]5. Installing Claude Code hooks...[/bold]")
+        ok, msg, changes = install_hooks()
+        if ok:
+            for hook_type, status in changes.items():
+                if status == "added":
+                    console.print(f"   [green]+[/green] {hook_type} hook added")
+                else:
+                    console.print(f"   [dim]=[/dim] {hook_type} already installed")
+        else:
+            console.print(f"   [red]FAIL[/red] {msg}")
+    else:
+        console.print("[bold]5. Skipping hooks[/bold] (--no-hooks)")
+
+    # Summary
+    console.print()
+    if all_ok:
+        console.print("[bold green]Engram is ready![/bold green]")
+        console.print("[dim]Try: engram save \"test observation\"[/dim]")
+    else:
+        console.print("[bold yellow]Setup incomplete. Fix issues above.[/bold yellow]")
+
+
+@main.command()
+@click.option("--hook", type=click.Choice(["post-tool-use", "stop"]), required=True,
+              help="Hook type that triggered this capture")
+def capture(hook: str):
+    """Capture observations from Claude Code hooks (internal use)."""
+    # Read JSON from stdin (Claude Code sends session data)
+    try:
+        if not sys.stdin.isatty():
+            input_data = sys.stdin.read()
+            if input_data.strip():
+                data = json.loads(input_data)
+            else:
+                data = {}
+        else:
+            data = {}
+    except json.JSONDecodeError:
+        data = {}
+
+    # Get project info
+    project_path = get_project_path()
+    project_name = get_project_name()
+
+    # Determine observation type and content based on hook
+    if hook == "post-tool-use":
+        # Extract tool usage info
+        tool_name = data.get("tool_name", "unknown")
+        tool_input = data.get("tool_input", {})
+
+        # Skip trivial tools
+        if tool_name in ("Read", "Glob", "Grep", "LS"):
+            return  # Don't save read-only operations
+
+        # Build observation content
+        content = f"[{tool_name}] "
+        if tool_name == "Bash":
+            content += tool_input.get("command", "")[:200]
+        elif tool_name in ("Edit", "Write"):
+            file_path = tool_input.get("file_path", "")
+            content += f"Modified {file_path}"
+        else:
+            content += json.dumps(tool_input)[:200]
+
+        obs_type = "change"
+
+    elif hook == "stop":
+        # Session end - could summarize the session
+        # For now, just note the session ended
+        content = f"Session ended in {project_name}"
+        obs_type = "discovery"
+
+    else:
+        return
+
+    # Save to engram (silently)
+    try:
+        db = init_db()
+        vector = VectorStore()
+
+        obs_id = save_observation(
+            db, "hook", obs_type, content, project_path=project_path
+        )
+
+        if vector.is_ready():
+            vector.add(obs_id, content, {
+                "type": obs_type,
+                "hook": hook,
+                "project_path": project_path,
+                "project_name": project_name,
+            })
+    except Exception:
+        pass  # Fail silently - don't interrupt Claude Code
 
 
 if __name__ == "__main__":
