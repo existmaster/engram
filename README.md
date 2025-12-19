@@ -11,20 +11,38 @@ Captures observations during coding sessions, stores them with vector embeddings
 - **Hybrid Search**: Combines vector similarity with full-text search
 - **Local-first**: SQLite + ChromaDB + Ollama, no external APIs required
 
+## Prerequisites
+
+1. **Python 3.11+** and [uv](https://docs.astral.sh/uv/)
+2. **Ollama** running locally: https://ollama.ai/
+3. **bge-m3** embedding model:
+   ```bash
+   ollama pull bge-m3
+   ```
+
 ## Installation
 
 ```bash
-# Install with uv
-uv pip install -e .
+# Clone the repository
+git clone https://github.com/existmaster/engram.git
+cd engram
 
-# Or install globally
-uv tool install .
+# Install globally (recommended)
+uv tool install -e .
+
+# Verify installation
+engram status
 ```
 
-## Prerequisites
+### Alternative: Development Mode
 
-- [Ollama](https://ollama.ai/) running locally
-- bge-m3 embedding model: `ollama pull bge-m3`
+```bash
+# Install in current project's venv
+uv pip install -e .
+
+# Run with uv
+uv run engram status
+```
 
 ## Usage
 
